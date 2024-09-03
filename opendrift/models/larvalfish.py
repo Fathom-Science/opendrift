@@ -68,7 +68,6 @@ class LarvalFish(OceanDrift):
     required_variables = {
         'x_sea_water_velocity': {'fallback': 0},
         'y_sea_water_velocity': {'fallback': 0},
-        'sea_surface_height': {'fallback': 0},
         'sea_surface_wave_significant_height': {'fallback': 0},
         'x_wind': {'fallback': 0},
         'y_wind': {'fallback': 0},
@@ -77,11 +76,10 @@ class LarvalFish(OceanDrift):
         'ocean_vertical_diffusivity': {'fallback': 0.01, 'profiles': True},
         'ocean_mixed_layer_thickness': {'fallback': 50},
         'sea_water_temperature': {'fallback': 10, 'profiles': True},
-        'sea_water_salinity': {'fallback': 34, 'profiles': True},
-        'sea_surface_wave_stokes_drift_x_velocity': {'fallback': 0},
-        'sea_surface_wave_stokes_drift_y_velocity': {'fallback': 0},
+        'sea_water_salinity': {'fallback': 34, 'profiles': True}
     }
 
+    required_profiles_z_range = [0, -50]  # The depth range (in m) which profiles should cover
 
     def __init__(self, *args, **kwargs):
 
@@ -94,6 +92,30 @@ class LarvalFish(OceanDrift):
                 {'type': 'float', 'default': 0.15,
                  'min': 0.0, 'max': 1.0, 'units': 'fraction',
                  'description': 'Fraction of timestep swimming',
+                 'level': CONFIG_LEVEL_ADVANCED},
+            })
+
+        self._add_config({
+            'IBM:min_swim_depth':
+                {'type': 'float', 'default': 0,
+                 'min': 0.0, 'max': 5000.0, 'units': 'fraction',
+                 'description': 'Min Swim Depth',
+                 'level': CONFIG_LEVEL_ADVANCED},
+            })
+        
+        self._add_config({
+            'IBM:max_swim_depth':
+                {'type': 'float', 'default': 0,
+                 'min': 0.0, 'max': 5000.0, 'units': 'fraction',
+                 'description': 'Max Swim Depth',
+                 'level': CONFIG_LEVEL_ADVANCED},
+            })
+
+        self._add_config({
+            'IBM:growth_fac':
+                {'type': 'float', 'default': 1,
+                 'min': 0.0, 'max': 2, 'units': 'fraction',
+                 'description': 'Growth Factor',
                  'level': CONFIG_LEVEL_ADVANCED},
             })
 
@@ -197,13 +219,15 @@ class LarvalFish(OceanDrift):
 
     def update_fish_larvae(self):
 
+        grow_fac = self.get_config('IBM:growth_fac')
+
         # Hatching of eggs
         eggs = np.where(self.elements.hatched==0)[0]
         if len(eggs) > 0:
             amb_duration = np.exp(3.65 - 0.145*self.environment.sea_water_temperature[eggs]) # Total egg development time (days) according to ambient temperature (Ellertsen et al. 1988)
             days_in_timestep = self.time_step.total_seconds()/(60*60*24)  # The fraction of a day completed in one time step
             amb_fraction = days_in_timestep/amb_duration # Fraction of development time completed during present time step
-            self.elements.stage_fraction[eggs] += amb_fraction # Add fraction completed during present timestep to cumulative fraction completed
+            self.elements.stage_fraction[eggs] += amb_fraction * grow_fac # Add fraction completed during present timestep to cumulative fraction completed
             hatching = np.where(self.elements.stage_fraction[eggs]>=1)[0]
             if len(hatching) > 0:
                 logger.debug('Hatching %s eggs' % len(hatching))
@@ -219,7 +243,7 @@ class LarvalFish(OceanDrift):
         avg_weight_before = self.elements.weight[larvae].mean()
         growth = self.fish_growth(self.elements.weight[larvae],
                                   self.environment.sea_water_temperature[larvae])
-        self.elements.weight[larvae] += growth
+        self.elements.weight[larvae] += growth * grow_fac
         avg_weight_after = self.elements.weight[larvae].mean()
         logger.debug('Growing %s larve from average size %s to %s' %
               (len(larvae), avg_weight_before, avg_weight_after))
@@ -239,6 +263,8 @@ class LarvalFish(OceanDrift):
         L = self.elements.length[larvae]
         swim_speed = (0.261*(L**(1.552*L**(-0.08))) - 5.289/L) / 1000
         f = self.get_config('IBM:fraction_of_timestep_swimming')
+        min_sd = self.get_config('IBM:min_swim_depth')
+        max_sd = self.get_config('IBM:max_swim_depth')
         max_migration_per_timestep = f*swim_speed*self.time_step.total_seconds()
 
         # Using here UTC hours. Should be changed to local solar time,
@@ -248,16 +274,33 @@ class LarvalFish(OceanDrift):
         else:
             direction = 1  # Swimming up when light is decreasing
 
-        self.elements.z[larvae] = np.minimum(0, self.elements.z[larvae] + direction*max_migration_per_timestep)
+#       Original code
+#        self.elements.z[larvae] = np.minimum(0, self.elements.z[larvae] + direction*max_migration_per_timestep)
+
+# --------- New Code ------------------- # 
+        for ii in range(0,len(larvae)):
+            dum_z=self.elements.z[larvae[ii]]
+            dum_dir=direction
+            dum_mig=max_migration_per_timestep[ii]
+
+            dum_z2=min(0,dum_z+dum_dir*dum_mig)
+            dum_z2=max(min_sd,abs(dum_z2))
+            dum_z2=min(max_sd,abs(dum_z2))
+            self.elements.z[larvae[ii]] = dum_z2*-1
+
+#            dum_z=self.elements.z[larvae[0]]
+#            dum_dir=direction
+#            if abs(dum_z) > max_sd and direction==-1: 
+#                dum_dir = 0
+#            if abs(dum_z) < min_sd and direction==1:
+#                dum_dir= 0
+#            self.elements.z[larvae[ii]] = np.minimum(0, dum_z + dum_dir*max_migration_per_timestep)
+# ----------------------------------------- # 
 
     def update(self):
 
         self.update_fish_larvae()
         self.advect_ocean_current()
-
-        # Stokes drift
-        self.stokes_drift()
-
         self.update_terminal_velocity()
         self.vertical_mixing()
         self.larvae_vertical_migration()
